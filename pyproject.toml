@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "recap"
+version = "0.1.0"
+description = "Turn YouTube links, audio and video files into timestamped transcripts and structured summaries."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.75",
+    "typer>=0.12",
+    "youtube-transcript-api>=1.2",
+    "yt-dlp>=2025.1.1",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+# CPU / NVIDIA fallback transcriber. Not needed when the whisper.cpp Vulkan build is installed.
+cpu = ["faster-whisper>=1.1"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+recap = "recap.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["recap*"]
+
+[tool.setuptools.package-data]
+"recap.web" = ["static/*", "static/fonts/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
