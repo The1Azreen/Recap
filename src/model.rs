@@ -1,5 +1,5 @@
 //! The one transcript format every source returns, plus the summary and library metadata.
-//! The JSON layout matches the Python version, so both read the same library.
+//! These are saved as JSON in the library (see library.rs).
 
 use serde::{Deserialize, Serialize};
 
