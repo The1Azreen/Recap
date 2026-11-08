@@ -23,6 +23,7 @@ dirs = "6"
 memmap2 = "0.9"
 unicode-bidi = "0.3"
 ar-reshaper = "1.5"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [profile.release]
 opt-level = 3

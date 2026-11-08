@@ -806,19 +806,14 @@ fn style_label(s: &str) -> &'static str {
     }
 }
 
-/// (year, month, day) in UTC for a Unix time stamp.
+/// (year, month, day) in the computer's local time zone for a Unix time stamp, so a recap made
+/// late in the evening lands on the day it was made.
 fn ymd(secs: f64) -> (i64, u32, u32) {
-    let days = (secs as i64).div_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
-    (y, m, d)
+    use chrono::{Datelike, Local, TimeZone};
+    match Local.timestamp_opt(secs as i64, 0).earliest() {
+        Some(d) => (i64::from(d.year()), d.month(), d.day()),
+        None => (1970, 1, 1),
+    }
 }
 
 #[cfg(test)]
@@ -826,10 +821,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dates() {
-        assert_eq!(ymd(0.0), (1970, 1, 1));
-        assert_eq!(ymd(1_762_560_000.0), (2025, 11, 8));
-        assert_eq!(ymd(951_782_400.0), (2000, 2, 29));
+    fn local_dates() {
+        use chrono::{Datelike, Local};
+        let now = Local::now();
+        assert_eq!(ymd(now.timestamp() as f64), (i64::from(now.year()), now.month(), now.day()));
     }
 
     #[test]
