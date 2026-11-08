@@ -131,11 +131,34 @@ pub fn open_url(url: &str) {
     let _ = Command::new("xdg-open").arg(url).spawn();
 }
 
+/// True while yt-dlp is updating itself; the Condvar wakes anyone waiting for it to finish.
+static YT_UPDATE: (std::sync::Mutex<bool>, std::sync::Condvar) = (std::sync::Mutex::new(false), std::sync::Condvar::new());
+
+/// Clears the "updating" flag however the update thread ends.
+struct UpdateDone;
+
+impl Drop for UpdateDone {
+    fn drop(&mut self) {
+        *YT_UPDATE.0.lock().unwrap_or_else(|e| e.into_inner()) = false;
+        YT_UPDATE.1.notify_all();
+    }
+}
+
+/// Waits (up to two minutes) while yt-dlp is replacing itself, so a recap doesn't run it
+/// half-updated. Returns at once when no update is running.
+pub fn wait_for_yt_dlp_update() {
+    let guard = YT_UPDATE.0.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = YT_UPDATE.1.wait_timeout_while(guard, std::time::Duration::from_secs(120), |updating| *updating);
+}
+
 /// Keeps yt-dlp current: at most once a day, in the background, update it to the latest
 /// nightly build. YouTube changes often and stale yt-dlp builds are the usual cause of
 /// failed downloads. Failures (e.g. a read-only or package-managed install) are ignored.
 pub fn update_yt_dlp_in_background() {
+    // Marked before the thread starts, so a recap begun right away still waits for it.
+    *YT_UPDATE.0.lock().unwrap_or_else(|e| e.into_inner()) = true;
     std::thread::spawn(|| {
+        let _done = UpdateDone;
         let Some(exe) = yt_dlp() else { return };
         let Some(dir) = exe.parent() else { return };
         let stamp = dir.join(".yt-dlp-last-update");

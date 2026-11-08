@@ -238,6 +238,7 @@ pub fn parse_subtitles(text: &str) -> Vec<Segment> {
 }
 
 fn yt_dlp() -> Result<PathBuf, String> {
+    tools::wait_for_yt_dlp_update();
     tools::yt_dlp().ok_or_else(|| "yt-dlp not found. Download yt-dlp.exe (github.com/yt-dlp/yt-dlp) and put it next to recap.exe or on PATH.".into())
 }
 
