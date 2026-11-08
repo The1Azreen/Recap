@@ -4,6 +4,7 @@
 //!   captions, the audio is downloaded and transcribed.
 //! * Other links: audio downloaded with yt-dlp, then transcribed.
 //! * Audio / video files: transcribed directly (ffmpeg pulls the audio out of video).
+//! * Subtitle files (.srt / .vtt): read as they are, no transcription.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ use crate::transcribe::{self, Progress};
 
 pub const VIDEO_EXTS: &[&str] = &["webm", "mp4", "mov", "mkv", "avi", "m4v", "wmv", "flv", "mpg", "mpeg", "3gp", "ts"];
 pub const AUDIO_EXTS: &[&str] = &["mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma", "aiff", "aif", "amr"];
+pub const SUBTITLE_EXTS: &[&str] = &["srt", "vtt"];
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -22,6 +24,7 @@ pub enum Kind {
     Url,
     Audio,
     Video,
+    Subtitles,
 }
 
 pub struct Options {
@@ -59,8 +62,10 @@ pub fn kind_of(src: &str) -> Result<Kind, String> {
         Ok(Kind::Video)
     } else if AUDIO_EXTS.contains(&ext.as_str()) {
         Ok(Kind::Audio)
+    } else if SUBTITLE_EXTS.contains(&ext.as_str()) {
+        Ok(Kind::Subtitles)
     } else {
-        Err(format!("Don't know how to read \"{src}\". Give a YouTube link, or an audio or video file."))
+        Err(format!("Don't know how to read \"{src}\". Give a YouTube link, an audio or video file, or an .srt / .vtt subtitle file."))
     }
 }
 
@@ -86,8 +91,12 @@ pub fn playlist_entries(url: &str) -> Result<Vec<String>, String> {
     Ok(urls)
 }
 
+/// Anything Recap can make a recap from: audio, video or a subtitle file.
 pub fn is_media_file(p: &Path) -> bool {
-    p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).is_some_and(|e| VIDEO_EXTS.contains(&e.as_str()) || AUDIO_EXTS.contains(&e.as_str()))
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| VIDEO_EXTS.contains(&e.as_str()) || AUDIO_EXTS.contains(&e.as_str()) || SUBTITLE_EXTS.contains(&e.as_str()))
 }
 
 /// Any source in, one Transcript out. Also returns the local media file to keep for playback,
@@ -95,6 +104,26 @@ pub fn is_media_file(p: &Path) -> bool {
 pub fn load(src: &str, opts: &Options, progress: Progress) -> Result<(Transcript, Option<PathBuf>, Option<tools::TempDir>), String> {
     match kind_of(src)? {
         Kind::YouTube | Kind::Url => load_url(src, opts, progress),
+        Kind::Subtitles => {
+            let path = PathBuf::from(src);
+            progress("subtitles", None, "Reading subtitles");
+            let text = std::fs::read(&path).map_err(|e| format!("Couldn't read {src}: {e}"))?;
+            let raw = parse_subtitles(&String::from_utf8_lossy(&text));
+            if raw.is_empty() {
+                return Err(format!("No subtitle lines found in {src}"));
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("srt").to_ascii_lowercase();
+            let t = Transcript {
+                segments: merge_segments(&raw, 150, 12.0),
+                source: src.to_string(),
+                source_type: "subtitles".into(),
+                title: path.file_stem().map(|s| clean_title(strip_lang(&s.to_string_lossy()))),
+                method: format!("Imported subtitles (.{ext})"),
+                ..Default::default()
+            };
+            // A video or audio file with the same name next to the subtitles is kept for playback.
+            Ok((t.finish(), sibling_media(&path), None))
+        }
         kind => {
             let path = PathBuf::from(src);
             if !path.is_file() {
@@ -116,6 +145,96 @@ pub fn load(src: &str, opts: &Options, progress: Progress) -> Result<(Transcript
             Ok((t.finish(), Some(path), None))
         }
     }
+}
+
+/// "en", "pt-BR", "en-orig": a 2-3 letter language code with an optional suffix.
+fn is_lang_code(s: &str) -> bool {
+    let (code, rest) = s.split_once('-').unwrap_or((s, ""));
+    (2..=3).contains(&code.len()) && code.chars().all(|c| c.is_ascii_alphabetic()) && rest.len() <= 8 && rest.chars().all(|c| c.is_ascii_alphanumeric())
+}
+
+/// "Talk.en-orig" -> "Talk": subtitle files are often named with their language.
+fn strip_lang(stem: &str) -> &str {
+    match stem.rsplit_once('.') {
+        Some((base, lang)) if !base.is_empty() && is_lang_code(lang) => base,
+        _ => stem,
+    }
+}
+
+/// "Talk.mp4" next to "Talk.srt" (or "Talk.en.srt").
+fn sibling_media(subs: &Path) -> Option<PathBuf> {
+    let dir = subs.parent()?;
+    let stem = subs.file_stem()?.to_string_lossy().into_owned();
+    // "Talk.en" -> also try "Talk"
+    let stems = [stem.clone(), strip_lang(&stem).to_string()];
+    stems.iter().filter(|s| !s.is_empty()).find_map(|s| {
+        VIDEO_EXTS.iter().chain(AUDIO_EXTS).map(|e| dir.join(format!("{s}.{e}"))).find(|p| p.is_file())
+    })
+}
+
+/// Parses SRT or WebVTT text into lines. Styling tags are dropped, and repeated lines (as in
+/// YouTube's rolling auto captions) are kept once.
+pub fn parse_subtitles(text: &str) -> Vec<Segment> {
+    fn time(s: &str) -> Option<f64> {
+        // 01:02:03,456 | 01:02:03.456 | 02:03.456
+        let s = s.trim().replace(',', ".");
+        let (hms, frac) = s.split_once('.').unwrap_or((&s, "0"));
+        let parts: Vec<f64> = hms.split(':').map(|p| p.trim().parse::<f64>()).collect::<Result<_, _>>().ok()?;
+        let secs = match parts.as_slice() {
+            [h, m, s] => h * 3600.0 + m * 60.0 + s,
+            [m, s] => m * 60.0 + s,
+            _ => return None,
+        };
+        let frac: f64 = format!("0.{}", frac.chars().take_while(char::is_ascii_digit).collect::<String>()).parse().unwrap_or(0.0);
+        Some(secs + frac)
+    }
+    fn clean(line: &str) -> String {
+        let mut out = String::new();
+        let mut depth = 0i32;
+        for c in line.chars() {
+            match c {
+                '<' | '{' => depth += 1,
+                '>' | '}' if depth > 0 => depth -= 1,
+                _ if depth == 0 => out.push(c),
+                _ => {}
+            }
+        }
+        out.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ").split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    let text = text.trim_start_matches('\u{feff}').replace("\r\n", "\n").replace('\r', "\n");
+    let mut segs: Vec<Segment> = Vec::new();
+    let (mut prev, mut prev_end): (Vec<String>, f64) = (Vec::new(), 0.0);
+    for block in text.split("\n\n") {
+        let mut lines = block.lines().map(str::trim).filter(|l| !l.is_empty());
+        // skip the cue number / id, find the timing line
+        let Some(timing) = lines.by_ref().find(|l| l.contains("-->")) else { continue };
+        let (a, b) = timing.split_once("-->").unwrap_or_default();
+        let b = b.split_whitespace().next().unwrap_or(""); // VTT settings follow the end time
+        let (Some(start), Some(end)) = (time(a), time(b)) else { continue };
+        let cue: Vec<String> = lines.map(clean).filter(|l| !l.is_empty()).collect();
+        // Rolling captions (YouTube auto captions) show the previous line again above the new
+        // one, and grow a line word by word: keep only what wasn't on screen in the last cue.
+        let rolling = start < prev_end + 0.5;
+        let mut fresh: Vec<&str> = Vec::new();
+        for line in &cue {
+            if prev.contains(line) {
+                continue;
+            }
+            match prev.iter().find(|p| rolling && line.starts_with(p.as_str())) {
+                Some(p) => fresh.push(line[p.len()..].trim()),
+                None => fresh.push(line),
+            }
+        }
+        let body = fresh.into_iter().filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+        prev = cue;
+        prev_end = end;
+        if !body.is_empty() {
+            segs.push(Segment { start, end: end.max(start), text: body, speaker: None });
+        }
+    }
+    segs.sort_by(|a, b| a.start.total_cmp(&b.start));
+    segs
 }
 
 fn yt_dlp() -> Result<PathBuf, String> {
@@ -333,6 +452,53 @@ mod tests {
     }
 
     #[test]
+    fn srt_and_vtt() {
+        let srt = "\u{feff}1\r\n00:00:01,000 --> 00:00:03,500\r\n<i>Hello</i> there\r\n\r\n2\r\n00:00:04,000 --> 00:00:06,000\r\nGeneral &amp; Kenobi\r\nsecond line\r\n";
+        let s = parse_subtitles(srt);
+        assert_eq!(s.len(), 2);
+        assert_eq!((s[0].start, s[0].end, s[0].text.as_str()), (1.0, 3.5, "Hello there"));
+        assert_eq!(s[1].text, "General & Kenobi second line");
+
+        let vtt = "WEBVTT\nKind: captions\n\nNOTE a comment\n\n00:01.000 --> 00:02.000 align:start position:0%\nwe were<00:01.500><c> talking</c>\n\n00:02.000 --> 00:03.000\nwe were talking\n\n00:02.010 --> 00:04.000\nwe were talking about it\n\n1:00:00.250 --> 1:00:01.000\n{\\an8}late\n";
+        let s = parse_subtitles(vtt);
+        let texts: Vec<&str> = s.iter().map(|x| x.text.as_str()).collect();
+        assert_eq!(texts, vec!["we were talking", "about it", "late"]);
+        assert_eq!(s[2].start, 3600.25);
+    }
+
+    #[test]
+    fn youtube_rolling_vtt() {
+        let vtt = "WEBVTT
+
+00:00:00.160 --> 00:00:02.000
+
+Ratchet<00:00:00.400><c> and</c><00:00:00.800><c> Clank</c>
+
+00:00:02.000 --> 00:00:02.010
+Ratchet and Clank
+ 
+
+00:00:02.010 --> 00:00:04.000
+Ratchet and Clank
+is<00:00:02.500><c> back</c>
+
+00:00:04.000 --> 00:00:04.010
+is back
+ 
+
+00:00:04.010 --> 00:00:06.000
+is back
+to being dormant
+";
+        let texts: Vec<String> = parse_subtitles(vtt).into_iter().map(|s| s.text).collect();
+        assert_eq!(texts, vec!["Ratchet and Clank", "is back", "to being dormant"]);
+        assert_eq!(strip_lang("Talk [DIp3iT-Raig].en-orig"), "Talk [DIp3iT-Raig]");
+        assert_eq!(strip_lang("Lecture 3.final cut"), "Lecture 3.final cut");
+        assert_eq!(strip_lang("Lecture.final"), "Lecture.final");
+        assert_eq!(strip_lang("Talk.pt-BR"), "Talk");
+    }
+
+    #[test]
     fn playlists() {
         assert!(is_playlist("https://www.youtube.com/playlist?list=PL1234567890"));
         assert!(!is_playlist("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1234567890"));
@@ -346,6 +512,7 @@ mod tests {
         assert_eq!(kind_of("https://vimeo.com/1"), Ok(Kind::Url));
         assert_eq!(kind_of("clip.WEBM"), Ok(Kind::Video));
         assert_eq!(kind_of("memo.m4a"), Ok(Kind::Audio));
+        assert_eq!(kind_of("talk.en.SRT"), Ok(Kind::Subtitles));
         assert!(kind_of("notes.docx").is_err());
     }
 

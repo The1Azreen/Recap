@@ -628,7 +628,8 @@ impl App {
     fn pick_file(&mut self, ctx: &egui::Context) {
         let mut exts: Vec<&str> = sources::AUDIO_EXTS.to_vec();
         exts.extend_from_slice(sources::VIDEO_EXTS);
-        if let Some(mut files) = rfd::FileDialog::new().add_filter("Audio and video", &exts).pick_files() {
+        exts.extend_from_slice(sources::SUBTITLE_EXTS);
+        if let Some(mut files) = rfd::FileDialog::new().add_filter("Audio, video and subtitles", &exts).add_filter("Subtitles (.srt, .vtt)", sources::SUBTITLE_EXTS).pick_files() {
             if files.len() == 1 {
                 self.file = files.pop();
                 self.url.clear();
@@ -666,7 +667,7 @@ impl App {
         p.extend(Shape::dashed_line(&pts, Stroke::new(1.5f32, col), 6.0, 4.0));
         let (main, sub) = match &self.file {
             Some(f) => (f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), "click to choose a different file".to_string()),
-            None => ("Drop audio / video here".into(), "or click to browse".into()),
+            None => ("Drop audio / video here".into(), "or subtitles (.srt) · click to browse".into()),
         };
         p.with_clip_rect(rect.shrink(4.0)).text(rect.center() - Vec2::new(0.0, 9.0), Align2::CENTER_CENTER, visual(&main), bold(16.0), col);
         p.text(rect.center() + Vec2::new(0.0, 12.0), Align2::CENTER_CENTER, sub, pixel(12.0), DIM);
@@ -1248,7 +1249,8 @@ fn run_recap(source: &str, opts: &sources::Options, summary: Option<(Client, Str
     // Keep something playable. Video: just the audio track (no re-encode). Audio: the file.
     let tmp_audio = tools::TempDir::new().map_err(|e| e.to_string())?;
     let media = match (kind, media) {
-        (Kind::Video, Some(v)) => {
+        // video (also a video found next to imported subtitles): keep only its audio track
+        (_, Some(v)) if sources::kind_of(&v.to_string_lossy()) == Ok(Kind::Video) => {
             progress("save", None, "Saving audio for playback");
             let out = tmp_audio.0.join("media.mka");
             let ok = tools::ffmpeg()

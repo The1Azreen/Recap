@@ -16,6 +16,8 @@ Input  →  Get text  →  Clean/chunk  →  Summarize  →  Output
 | Other video link | Audio downloaded with `yt-dlp`, then transcribed. |
 | Audio file | Transcribed locally with whisper.cpp. |
 | Video file | `ffmpeg` pulls the audio out, which is then transcribed. |
+| Subtitle file (`.srt`, `.vtt`) | Read as it is, no transcription. A video or audio file with the same name next to it is kept for playback. |
+| YouTube playlist link | Every video in it is added to the queue. |
 
 ## AMD GPU transcription
 
@@ -51,6 +53,8 @@ Settings → *Open tools folder* shows where to drop the tools. To make Recap po
 
 ## Using it
 
+- Drop several files (or pick several, or paste a playlist link) and they're recapped one
+  after another; while a recap runs, **Add to queue** lines up the next one.
 - Paste a link or drop a file on the window, pick a summary style in the top bar (General,
   Meeting, Lecture, Podcast) and press **Recap it**.
 - Click a transcript line or chapter to play from that moment. Playback is native, through the

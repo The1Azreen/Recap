@@ -629,7 +629,8 @@ fn build_tree(library: &[Meta]) -> Node {
             "url" => "1",
             "video" => "2",
             "audio" => "3",
-            _ => "4",
+            "subtitles" => "4",
+            _ => "5",
         };
         (order.into(), source_name(&m.source_type).into())
     });
@@ -649,6 +650,8 @@ fn build_tree(library: &[Meta]) -> Node {
             ("1".into(), "Whisper (GPU)".into())
         } else if m.method.contains("whisper") {
             ("2".into(), "Whisper (CPU)".into())
+        } else if m.method.starts_with("Imported") {
+            ("3".into(), "Imported subtitles".into())
         } else {
             ("3".into(), "Other".into())
         }
@@ -751,6 +754,10 @@ fn file_icon(p: &egui::Painter, r: Rect, source_type: &str) {
                 p.rect_filled(Rect::from_min_size(Pos2::new(x, badge.bottom() - 1.8 * s), Vec2::splat(s)), 0.0, INK);
             }
         }
+        "subtitles" => {
+            p.rect(badge, 1.0 * s, YELLOW, outline, StrokeKind::Middle);
+            p.text(c, Align2::CENTER_CENTER, "CC", bold(4.2 * s), INK);
+        }
         "audio" => {
             p.circle(at(12.0, 13.0), 3.4 * s, YELLOW, outline);
             p.circle_filled(at(11.3, 14.0), 1.1 * s, INK);
@@ -793,6 +800,7 @@ fn source_name(source_type: &str) -> &'static str {
         "url" => "Web links",
         "video" => "Video files",
         "audio" => "Audio files",
+        "subtitles" => "Subtitle files",
         _ => "Other",
     }
 }
