@@ -13,6 +13,7 @@ use crate::claude::{self, Client};
 use crate::model::{fmt_ts, parse_ts, Meta, Summary, Transcript};
 use crate::sources::{self, Kind};
 use crate::theme::*;
+use crate::explorer::{self, Explorer};
 use crate::{export, library, tools, transcribe};
 
 /// Transcription saturates the GPU, so recaps run one at a time.
@@ -29,6 +30,7 @@ pub struct Options {
     pub source: Option<String>,
     pub open_id: Option<String>,
     pub screenshot: Option<PathBuf>,
+    pub explorer: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -124,6 +126,7 @@ pub struct App {
     answer: Option<(String, String)>,
 
     show_settings: bool,
+    explorer: Explorer,
     engine: (String, bool),
     shot: Option<Shot>,
 }
@@ -131,6 +134,7 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: Options) -> Self {
         install(&cc.egui_ctx);
+        tools::update_yt_dlp_in_background();
         let saved: Saved = cc.storage.and_then(|s| eframe::get_value(s, "recap")).unwrap_or_default();
         set_glow(saved.glow);
         let (tx, rx) = channel();
@@ -163,6 +167,7 @@ impl App {
             question: String::new(),
             answer: None,
             show_settings: false,
+            explorer: Explorer::new(opts.explorer),
             engine: engine(),
             shot: opts.screenshot.map(|path| Shot { path, at: 2.5, waiting: false }),
         };
@@ -373,6 +378,7 @@ impl App {
     fn refresh_library(&mut self) {
         self.library = library::list();
         self.search_cache.clear();
+        self.explorer.invalidate();
         if self.hits.is_some() {
             self.run_search();
         }
@@ -533,6 +539,9 @@ impl App {
                 }
                 if ui.button("Open file").clicked() {
                     self.pick_file();
+                }
+                if ui.add(egui::Button::new("Transcripts").selected(self.explorer.open)).on_hover_text("Browse and search all your transcripts").clicked() {
+                    self.explorer.open = !self.explorer.open;
                 }
             });
         });
@@ -1235,6 +1244,15 @@ impl eframe::App for App {
         });
 
         self.settings_window(ctx);
+        match self.explorer.show(ctx, &self.library) {
+            Some(explorer::Action::Open(id, at)) => self.open_item(&id, at),
+            Some(explorer::Action::ShowInFolder(id)) => {
+                if let Ok(d) = library::dir(&id) {
+                    tools::open_in_file_manager(&d);
+                }
+            }
+            None => {}
+        }
         self.take_screenshot(ctx);
 
         let busy = self.busy || self.side_busy.is_some();

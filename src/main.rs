@@ -4,6 +4,7 @@ mod app;
 #[allow(dead_code)]
 mod audio;
 mod claude;
+mod explorer;
 mod export;
 mod library;
 mod model;
@@ -19,6 +20,7 @@ const USAGE: &str = "\
 recap [FILE|URL] [options]
 
   --open <id>            open this saved recap
+  --explorer             start with the Transcripts explorer open
   --size <WxH>           window size, e.g. 1400x900
   --screenshot <file>    save a screenshot after start-up and quit
   -h, --help             this text
@@ -39,6 +41,7 @@ fn main() -> eframe::Result {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--open" => opts.open_id = args.next(),
+            "--explorer" => opts.explorer = true,
             "--screenshot" => opts.screenshot = args.next().map(PathBuf::from),
             "--size" => {
                 if let Some((w, h)) = args.next().as_deref().and_then(|s| s.split_once('x')) {

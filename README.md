@@ -40,7 +40,8 @@ downloads the `large-v3-turbo` model (1.6 GB) into `~\Recap\models`. The top bar
 2. External tools are looked up next to `recap.exe`, then in `~\Recap\tools`, then in the repo's
    git-ignored `tools\` folder (for dev builds under `target\`), then on `PATH`:
    - `ffmpeg.exe` (and `ffprobe.exe`)
-   - `yt-dlp.exe` from [github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp/releases)
+   - `yt-dlp.exe` from [github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp/releases).
+     Recap updates it to the latest nightly build in the background, at most once a day.
    - `whisper-cli.exe` from the build script above
 3. For summaries and Q&A, add a Claude API key in **Settings**, or set `ANTHROPIC_API_KEY`.
    Transcripts work without a key.
@@ -56,6 +57,9 @@ Settings → *Open tools folder* shows where to drop the tools. To make Recap po
   same audio engine as JAMP. Uploaded files keep their audio. For YouTube recaps, press
   **Download audio** to play them inside Recap. **Open on YouTube** is the only thing that
   opens a browser, and only when you click it.
+- **Transcripts** (top bar) opens a file explorer over the library: folders by source, month,
+  summary style and method, large icons, a details pane, sorting, and a search through the full
+  text of every transcript. Double-click a transcript to open it (at the match, when searching).
 - The Library search covers every saved transcript. The Ask window answers questions about the
   open recap, with clickable timestamps.
 - **Export…** writes `.md` (with YouTube timestamp links), `.srt`, `.txt` and `.json`.

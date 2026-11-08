@@ -130,3 +130,32 @@ pub fn open_url(url: &str) {
     #[cfg(all(unix, not(target_os = "macos")))]
     let _ = Command::new("xdg-open").arg(url).spawn();
 }
+
+/// Keeps yt-dlp current: at most once a day, in the background, update it to the latest
+/// nightly build. YouTube changes often and stale yt-dlp builds are the usual cause of
+/// failed downloads. Failures (e.g. a read-only or package-managed install) are ignored.
+pub fn update_yt_dlp_in_background() {
+    std::thread::spawn(|| {
+        let Some(exe) = yt_dlp() else { return };
+        let Some(dir) = exe.parent() else { return };
+        let stamp = dir.join(".yt-dlp-last-update");
+        let fresh = std::fs::metadata(&stamp)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age < std::time::Duration::from_secs(24 * 3600));
+        if fresh {
+            return;
+        }
+        let ok = command(&exe)
+            .args(["--update-to", "nightly"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok {
+            let _ = std::fs::write(&stamp, b"");
+        }
+    });
+}

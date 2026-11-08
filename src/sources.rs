@@ -104,11 +104,13 @@ fn load_url(url: &str, opts: &Options, progress: Progress) -> Result<(Transcript
     let vid = video_id(url);
     if let (Some(v), false) = (&vid, opts.force_transcribe) {
         progress("captions", None, "Fetching YouTube captions");
-        if let Some(t) = captions(url, v, opts.language.as_deref())? {
+        // Captions are only a shortcut: if YouTube refuses them (e.g. HTTP 429 rate limiting),
+        // transcribe the audio instead of failing the whole recap.
+        if let Ok(Some(t)) = captions(url, v, opts.language.as_deref()) {
             return Ok((t, None, None));
         }
     }
-    progress("download", None, if vid.is_some() { "No captions, downloading audio" } else { "Downloading audio" });
+    progress("download", None, if vid.is_some() { "No captions available, downloading audio" } else { "Downloading audio" });
     let tmp = tools::TempDir::new().map_err(|e| e.to_string())?;
     let (audio, title) = download_audio(url, &tmp.0, progress)?;
     let r = transcribe::transcribe(&audio, &opts.model, opts.language.as_deref(), progress)?;
@@ -125,27 +127,65 @@ fn load_url(url: &str, opts: &Options, progress: Progress) -> Result<(Transcript
     Ok((t.finish(), Some(audio), Some(tmp)))
 }
 
-/// Asks yt-dlp for the video's caption tracks without downloading the video.
-/// Prefers human-made captions, then auto captions in the original language.
+/// Picks one caption track from yt-dlp's info: human-made captions in the wanted language first,
+/// then auto captions in the video's original language. Asking for every matching track at once
+/// (auto-dubbed videos have 20+ `xx-orig` tracks) gets rate limited by YouTube (HTTP 429).
+fn pick_track(info: &serde_json::Value, language: Option<&str>) -> Option<String> {
+    let keys = |field: &str| -> Vec<String> { info[field].as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default() };
+    let (manual, auto) = (keys("subtitles"), keys("automatic_captions"));
+    let orig = info["language"].as_str().and_then(|l| l.split('-').next()).map(str::to_lowercase);
+    let wanted: Vec<String> = match language {
+        Some(l) => vec![l.to_lowercase()],
+        None => std::iter::once("en".to_string()).chain(orig.clone()).collect(),
+    };
+    let matches = |k: &str, l: &str| {
+        let k = k.to_lowercase();
+        k == l || k.starts_with(&format!("{l}-"))
+    };
+    // human-made captions (not live chat), shortest code first: "en" before "en-GB"
+    let mut human: Vec<&String> = manual.iter().filter(|k| *k != "live_chat" && wanted.iter().any(|l| matches(k, l))).collect();
+    human.sort_by_key(|k| k.len());
+    if let Some(k) = human.first() {
+        return Some((*k).clone());
+    }
+    // auto captions: the original-language track first
+    let base = language.map(str::to_lowercase).or(orig).unwrap_or_else(|| "en".into());
+    let prefs = [format!("{base}-orig"), base, "en-orig".into(), "en".into()];
+    prefs.iter().find(|p| auto.contains(p)).cloned().or_else(|| auto.iter().find(|k| k.ends_with("-orig")).cloned())
+}
+
+/// Gets the video's captions without downloading the video: first the video info (one
+/// request), then only the single best caption track.
 fn captions(url: &str, vid: &str, language: Option<&str>) -> Result<Option<Transcript>, String> {
     let ytdlp = yt_dlp()?;
     let tmp = tools::TempDir::new().map_err(|e| e.to_string())?;
-    let langs = match language {
-        Some(l) => format!("{l},{l}-.*"),
-        None => "en,en-.*,.*-orig".into(),
-    };
+    let info_path = tmp.0.join("v.info.json");
     let out = tools::command(&ytdlp)
-        .args(["--skip-download", "--write-subs", "--write-auto-subs", "--sub-format", "json3", "--sub-langs", &langs])
-        .args(["--write-info-json", "--no-playlist", "--no-warnings", "--ignore-no-formats-error", "-o"])
+        .args(["--skip-download", "--write-info-json", "--no-playlist", "--no-warnings", "--ignore-no-formats-error", "-o"])
         .arg(tmp.0.join("v.%(ext)s"))
         .arg(url)
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("Couldn't run yt-dlp: {e}"))?;
-    let info: serde_json::Value = std::fs::read_to_string(tmp.0.join("v.info.json"))
+    let info: serde_json::Value = std::fs::read_to_string(&info_path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .ok_or_else(|| format!("yt-dlp couldn't read the video: {}", String::from_utf8_lossy(&out.stderr).trim()))?;
+    let Some(track) = pick_track(&info, language) else { return Ok(None) };
+
+    // Reuse the info already fetched instead of loading the page again.
+    let out = tools::command(&ytdlp)
+        .args(["--skip-download", "--write-subs", "--write-auto-subs", "--sub-format", "json3", "--sub-langs", &track])
+        .args(["--no-warnings", "--ignore-no-formats-error", "--load-info-json"])
+        .arg(&info_path)
+        .arg("-o")
+        .arg(tmp.0.join("v.%(ext)s"))
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("Couldn't run yt-dlp: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("Couldn't fetch captions: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
 
     // v.<lang>.json3 files that were written
     let files: Vec<(String, PathBuf)> = std::fs::read_dir(&tmp.0)
@@ -277,5 +317,22 @@ mod tests {
         assert_eq!(kind_of("clip.WEBM"), Ok(Kind::Video));
         assert_eq!(kind_of("memo.m4a"), Ok(Kind::Audio));
         assert!(kind_of("notes.docx").is_err());
+    }
+
+    #[test]
+    fn picks_one_caption_track() {
+        let dubbed = serde_json::json!({
+            "language": "en-US",
+            "subtitles": {},
+            "automatic_captions": {"ar-orig": [], "de-orig": [], "en": [], "en-orig": [], "fr": [], "ja-orig": []}
+        });
+        assert_eq!(pick_track(&dubbed, None).as_deref(), Some("en-orig"));
+        assert_eq!(pick_track(&dubbed, Some("ja")).as_deref(), Some("ja-orig"));
+        let human = serde_json::json!({"language": "fr", "subtitles": {"en-GB": [], "en": [], "live_chat": []}, "automatic_captions": {"fr-orig": []}});
+        assert_eq!(pick_track(&human, None).as_deref(), Some("en"));
+        let french = serde_json::json!({"language": "fr", "subtitles": {}, "automatic_captions": {"fr-orig": [], "en": []}});
+        assert_eq!(pick_track(&french, None).as_deref(), Some("fr-orig"));
+        let none = serde_json::json!({"language": "en", "subtitles": {}, "automatic_captions": {}});
+        assert_eq!(pick_track(&none, None), None);
     }
 }
