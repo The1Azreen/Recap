@@ -839,9 +839,14 @@ impl App {
     }
 
     fn transcript_view(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut self.tr_filter).hint_text("Find in transcript…").desired_width(ui.available_width() - 80.0));
+        // Lay out right-to-left so the search box takes exactly what the checkbox leaves; a row
+        // wider than the panel would make the resizable panel grow a little every frame. The row
+        // gets a fixed height: a bare right_to_left layout would claim the whole panel height.
+        let row = Vec2::new(ui.available_width(), ui.spacing().interact_size.y + 4.0);
+        ui.allocate_ui_with_layout(row, egui::Layout::right_to_left(Align::Center), |ui| {
             ui.checkbox(&mut self.follow, "Follow");
+            let margin = ui.spacing().button_padding.x * 2.0;
+            ui.add(egui::TextEdit::singleline(&mut self.tr_filter).hint_text("Find in transcript…").desired_width((ui.available_width() - margin).max(40.0)));
         });
         let Some(o) = &self.open else {
             ui.add_space(20.0);
@@ -1212,8 +1217,12 @@ impl eframe::App for App {
             let h = ui.available_height();
             fill_window(ui, "Library", h, |ui| self.library_view(ui));
         });
-        let right_w = (ctx.screen_rect().width() * 0.4).clamp(320.0, 720.0);
-        egui::SidePanel::right("transcript").resizable(true).default_width(right_w).width_range(280.0..=1000.0).frame(pad).show(ctx, |ui| {
+        // Cap at half the window so the Summary/Ask column always keeps room (this also pulls
+        // back a width that was saved while the panel was creeping).
+        let screen_w = ctx.screen_rect().width();
+        let right_w = (screen_w * 0.4).clamp(320.0, 720.0);
+        let right_max = (screen_w * 0.5).max(300.0);
+        egui::SidePanel::right("transcript").resizable(true).default_width(right_w.min(right_max)).width_range(280.0..=right_max).frame(pad).show(ctx, |ui| {
             let h = ui.available_height();
             fill_window(ui, "Transcript", h, |ui| self.transcript_view(ui));
         });
@@ -1247,13 +1256,14 @@ impl eframe::App for App {
 const TIME_W: f32 = 74.0;
 
 /// A site window that fills `height` (minus room for its drop shadow).
+/// The parent only ever sees the fixed rect, so content that overflows can't widen a side panel.
 fn fill_window(ui: &mut Ui, title: &str, height: f32, add: impl FnOnce(&mut Ui)) {
     let w = ui.available_width();
-    ui.allocate_ui(Vec2::new(w, (height - 6.0).max(80.0)), |ui| {
-        window(ui, title, |ui| {
-            ui.set_min_height(ui.available_height());
-            add(ui)
-        })
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, (height - 6.0).max(80.0)), Sense::hover());
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(*ui.layout()));
+    window(&mut child, title, |ui| {
+        ui.set_min_height(ui.available_height());
+        add(ui)
     });
 }
 

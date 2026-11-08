@@ -50,10 +50,16 @@ pub fn find(name: &str, subdir: Option<&str>) -> Option<PathBuf> {
             candidates.push(d.join(s).join(&file));
         }
     }
-    let t = tools_dir();
-    candidates.push(t.join(&file));
-    if let Some(s) = subdir {
-        candidates.push(t.join(s).join(&file));
+    let mut tool_dirs = vec![tools_dir()];
+    // Dev builds: a `tools` folder in the repo root, two levels above target\<profile>\recap.exe.
+    if let Some(root) = exe_dir().as_deref().and_then(|d| d.parent()).and_then(|d| d.parent()) {
+        tool_dirs.push(root.join("tools"));
+    }
+    for t in tool_dirs {
+        candidates.push(t.join(&file));
+        if let Some(s) = subdir {
+            candidates.push(t.join(s).join(&file));
+        }
     }
     candidates.into_iter().find(|p| p.is_file()).or_else(|| on_path(name))
 }

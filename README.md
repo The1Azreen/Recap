@@ -37,7 +37,8 @@ downloads the `large-v3-turbo` model (1.6 GB) into `~\Recap\models`. The top bar
 ## Setup
 
 1. `cargo build --release` produces `target\release\recap.exe`.
-2. External tools are looked up next to `recap.exe`, then in `~\Recap\tools`, then on `PATH`:
+2. External tools are looked up next to `recap.exe`, then in `~\Recap\tools`, then in the repo's
+   git-ignored `tools\` folder (for dev builds under `target\`), then on `PATH`:
    - `ffmpeg.exe` (and `ffprobe.exe`)
    - `yt-dlp.exe` from [github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp/releases)
    - `whisper-cli.exe` from the build script above

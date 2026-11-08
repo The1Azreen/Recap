@@ -7,3 +7,8 @@ build/
 dist/
 *.srt
 *.part
+
+# Locally installed tools (whisper.cpp, ffmpeg, yt-dlp) and models
+tools/
+models/
+recap-data/
