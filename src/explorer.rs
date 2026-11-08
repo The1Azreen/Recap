@@ -7,6 +7,8 @@
 //! of every transcript.
 
 use std::collections::HashMap;
+use std::io::Read;
+use std::sync::mpsc;
 
 use egui::text::LayoutJob;
 use egui::{Align, Align2, Color32, Pos2, Rect, RichText, Sense, Shape, Stroke, StrokeKind, Ui, Vec2};
@@ -88,6 +90,15 @@ pub struct Explorer {
     /// (recap id, armed until): Delete asks once more before it deletes
     arm_delete: Option<(String, f64)>,
     focus_rename: bool,
+    /// YouTube thumbnails per recap id: Some once loaded, None while loading or when unavailable.
+    thumbs: HashMap<String, Option<egui::TextureHandle>>,
+    thumb_worker: Option<ThumbWorker>,
+}
+
+/// One background thread that fetches thumbnails one at a time.
+struct ThumbWorker {
+    jobs: mpsc::Sender<(String, String)>,
+    done: mpsc::Receiver<(String, Option<egui::ColorImage>)>,
 }
 
 impl Explorer {
@@ -159,6 +170,13 @@ impl Explorer {
             self.hits = Some((q.clone(), library.len(), hits));
         }
 
+        // thumbnails that finished loading since the last frame
+        if let Some(w) = &self.thumb_worker {
+            for (id, img) in w.done.try_iter() {
+                let tex = img.map(|img| ui.ctx().load_texture(format!("thumb-{id}"), img, egui::TextureOptions::LINEAR));
+                self.thumbs.insert(id, tex);
+            }
+        }
         let (area, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
         let tool_r = Rect::from_min_size(area.min, Vec2::new(area.width(), 26.0));
         let status_r = Rect::from_min_max(Pos2::new(area.left(), area.bottom() - 22.0), area.max);
@@ -320,6 +338,10 @@ impl Explorer {
                     Entry::Item(ix) => (format!("i:{}", library[*ix].id), Sel::Item(library[*ix].id.clone())),
                 };
                 let resp = ui.interact(rect, ui.id().with(("ex-tile", &key)), Sense::click());
+                let thumb = match e {
+                    Entry::Item(ix) => self.thumb(ui.ctx(), &library[*ix]),
+                    Entry::Folder(_) => None,
+                };
                 let on = self.selected.as_ref() == Some(&sel);
                 let p = ui.painter();
                 if on {
@@ -336,7 +358,10 @@ impl Explorer {
                     }
                     Entry::Item(ix) => {
                         let m = &library[*ix];
-                        file_icon(p, icon, &m.source_type);
+                        match &thumb {
+                            Some(tex) => thumb_image(p, Rect::from_center_size(icon.center(), Vec2::new((tile_w - 16.0).min(96.0), 54.0)), tex),
+                            None => file_icon(p, icon, &m.source_type),
+                        }
                         let sub = match self.hits.as_ref().and_then(|(_, _, h)| h.iter().find(|h| h.idx == *ix)) {
                             Some(h) if h.count > 0 => plural(h.count, "match", "matches"),
                             Some(_) => "title match".into(),
@@ -433,8 +458,17 @@ impl Explorer {
             };
             if let Some(ix) = item {
                 let m = &library[ix];
-                let (r, _) = ui.allocate_exact_size(Vec2::new(64.0, 64.0), Sense::hover());
-                file_icon(ui.painter(), r, &m.source_type);
+                match self.thumb(ui.ctx(), m) {
+                    Some(tex) => {
+                        let w = ui.available_width().min(280.0);
+                        let (r, _) = ui.allocate_exact_size(Vec2::new(w, w * 9.0 / 16.0), Sense::hover());
+                        thumb_image(ui.painter(), r, &tex);
+                    }
+                    None => {
+                        let (r, _) = ui.allocate_exact_size(Vec2::new(64.0, 64.0), Sense::hover());
+                        file_icon(ui.painter(), r, &m.source_type);
+                    }
+                }
                 match self.renaming.as_mut().filter(|(id, _)| *id == m.id) {
                     Some((_, name)) => {
                         let te = ui.add(egui::TextEdit::singleline(name).desired_width(ui.available_width() - 8.0));
@@ -577,6 +611,35 @@ impl Explorer {
         p.text(r.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, left, pixel(12.0), YELLOW);
         let right = format!("{} in library", plural(library.len(), "recap", "recaps"));
         p.text(r.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, right, pixel(12.0), TEAL);
+    }
+
+    // ------------------------------------------------------------------------------- thumbnails
+
+    /// The YouTube thumbnail for a recap, if it has one and it's loaded. The first ask queues it:
+    /// read from the recap's folder, or downloaded once and saved there.
+    fn thumb(&mut self, ctx: &egui::Context, m: &Meta) -> Option<egui::TextureHandle> {
+        let vid = m.video_id.as_ref().filter(|v| v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))?;
+        if let Some(t) = self.thumbs.get(&m.id) {
+            return t.clone();
+        }
+        self.thumbs.insert(m.id.clone(), None);
+        let worker = self.thumb_worker.get_or_insert_with(|| {
+            let (jobs, job_rx) = mpsc::channel::<(String, String)>();
+            let (done_tx, done) = mpsc::channel();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                for (id, vid) in job_rx {
+                    let img = load_thumb(&id, &vid);
+                    if done_tx.send((id, img)).is_err() {
+                        break;
+                    }
+                    ctx.request_repaint();
+                }
+            });
+            ThumbWorker { jobs, done }
+        });
+        let _ = worker.jobs.send((m.id.clone(), vid.clone()));
+        None
     }
 
     // ------------------------------------------------------------------------------- search
@@ -769,6 +832,36 @@ fn file_icon(p: &egui::Painter, r: Rect, source_type: &str) {
             p.line_segment([at(12.0, 9.8), at(12.0, 16.2)], Stroke::new((s * 0.5).max(1.0), INK));
         }
     }
+}
+
+/// Reads `thumb.jpg` from the recap's folder, downloading it from YouTube the first time.
+fn load_thumb(id: &str, vid: &str) -> Option<egui::ColorImage> {
+    let path = library::dir(id).ok()?.join("thumb.jpg");
+    if !path.is_file() {
+        let resp = ureq::get(&format!("https://i.ytimg.com/vi/{vid}/mqdefault.jpg")).timeout(std::time::Duration::from_secs(15)).call().ok()?;
+        let mut bytes = Vec::new();
+        resp.into_reader().take(4 << 20).read_to_end(&mut bytes).ok()?;
+        image::load_from_memory(&bytes).ok()?; // only keep it if it's a real image
+        std::fs::write(&path, &bytes).ok()?;
+    }
+    let img = image::load_from_memory(&std::fs::read(&path).ok()?).ok()?.to_rgba8();
+    Some(egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw()))
+}
+
+/// A thumbnail with the site's thick border, cropped to fill `r`.
+fn thumb_image(p: &egui::Painter, r: Rect, tex: &egui::TextureHandle) {
+    let [w, h] = tex.size().map(|v| v as f32);
+    let (want, have) = (r.width() / r.height(), w / h);
+    // crop the texture so it fills r without stretching
+    let uv = if have > want {
+        let k = want / have;
+        Rect::from_min_max(Pos2::new(0.5 - k / 2.0, 0.0), Pos2::new(0.5 + k / 2.0, 1.0))
+    } else {
+        let k = have / want;
+        Rect::from_min_max(Pos2::new(0.0, 0.5 - k / 2.0), Pos2::new(1.0, 0.5 + k / 2.0))
+    };
+    p.image(tex.id(), r, uv, Color32::WHITE);
+    p.rect_stroke(r, 0.0, Stroke::new(2.0f32, YELLOW), StrokeKind::Outside);
 }
 
 fn field(ui: &mut Ui, label: &str, value: &str) {
