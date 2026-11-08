@@ -45,6 +45,7 @@ struct Saved {
     effort: String,
     summarize: bool,
     force_transcribe: bool,
+    speaker_turns: bool,
     glow: bool,
     volume: f32,
 }
@@ -59,6 +60,7 @@ impl Default for Saved {
             effort: "medium".into(),
             summarize: true,
             force_transcribe: false,
+            speaker_turns: false,
             glow: true,
             volume: 0.7,
         }
@@ -328,6 +330,7 @@ impl App {
             model: self.saved.model.clone(),
             language: Some(self.saved.language.trim().to_string()).filter(|l| !l.is_empty() && l != "auto"),
             force_transcribe: self.saved.force_transcribe,
+            speaker_turns: self.saved.speaker_turns,
         };
         let style = self.saved.style.clone();
         let client = self.client();
@@ -731,6 +734,9 @@ impl App {
                 .on_disabled_hover_text("Add a Claude API key in Settings to summarize");
         });
         ui.checkbox(&mut self.saved.force_transcribe, "Ignore YouTube captions");
+        ui.checkbox(&mut self.saved.speaker_turns, "Label speakers (English)").on_hover_text(
+            "Marks where the speaker changes, as Speaker A / Speaker B. Works best for two people              (interviews, podcasts) and only when the audio is transcribed, not with YouTube captions.              The first time, a 488 MB model is downloaded.",
+        );
         ui.add_space(6.0);
         let has_input = self.file.is_some() || !self.url.trim().is_empty();
         let label = if !self.busy { "▶ Recap it" } else if has_input { "+ Add to queue" } else { "Working…" };
@@ -1273,6 +1279,7 @@ pub struct CliArgs {
     pub style: String,
     pub summarize: bool,
     pub force_transcribe: bool,
+    pub speaker_turns: bool,
     pub model: String,
     pub language: Option<String>,
 }
@@ -1281,7 +1288,7 @@ pub struct CliArgs {
 /// The Claude key comes from ANTHROPIC_API_KEY, or the one saved in Settings.
 pub fn cli(a: CliArgs) -> i32 {
     let key = std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.trim().is_empty()).or_else(claude::load_key).unwrap_or_default();
-    let opts = sources::Options { model: a.model, language: a.language, force_transcribe: a.force_transcribe };
+    let opts = sources::Options { model: a.model, language: a.language, force_transcribe: a.force_transcribe, speaker_turns: a.speaker_turns };
     if a.summarize && key.trim().is_empty() {
         println!("note: ANTHROPIC_API_KEY not set, skipping the summary");
     }

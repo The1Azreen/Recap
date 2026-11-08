@@ -58,6 +58,10 @@ Settings → *Open tools folder* shows where to drop the tools. To make Recap po
   after another; while a recap runs, **Add to queue** lines up the next one.
 - Paste a link or drop a file on the window, pick a summary style in the top bar (General,
   Meeting, Lecture, Podcast) and press **Recap it**.
+- **Label speakers (English)** marks where the speaker changes, as Speaker A / Speaker B. It uses
+  whisper.cpp's tinydiarize model (`small.en-tdrz`, 488 MB, downloaded the first time) in a quick
+  second pass. It only detects *changes*, not voices, so it suits two-person interviews and
+  podcasts, and a missed change swaps the labels until the next one.
 - Click a transcript line or chapter to play from that moment. Playback is native, through the
   same audio engine as JAMP. Uploaded files keep their audio. For YouTube recaps, press
   **Download audio** to play them inside Recap. **Open on YouTube** is the only thing that

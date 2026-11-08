@@ -26,7 +26,7 @@ recap [FILE|URL] [options]
   -h, --help             this text
 
 recap --cli <FILE|URL> [--style general|meeting|lecture|podcast] [--no-summary]
-                       [--transcribe] [--model large-v3-turbo] [--lang en]
+                       [--transcribe] [--speakers] [--model large-v3-turbo] [--lang en]
   Run without the window; the recap is saved to the library.
   Summaries use ANTHROPIC_API_KEY.";
 
@@ -87,6 +87,7 @@ fn run_cli(args: &[String]) -> i32 {
         style: "general".into(),
         summarize: true,
         force_transcribe: false,
+        speaker_turns: false,
         model: transcribe::DEFAULT_MODEL.into(),
         language: None,
     };
@@ -98,6 +99,7 @@ fn run_cli(args: &[String]) -> i32 {
             "--lang" => a.language = it.next().cloned(),
             "--no-summary" => a.summarize = false,
             "--transcribe" => a.force_transcribe = true,
+            "--speakers" => a.speaker_turns = true,
             _ => a.source = x.clone(),
         }
     }

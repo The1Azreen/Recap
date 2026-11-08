@@ -31,6 +31,8 @@ pub struct Options {
     pub model: String,
     pub language: Option<String>,
     pub force_transcribe: bool,
+    /// Label speaker changes (English, two speakers) with a second whisper pass.
+    pub speaker_turns: bool,
 }
 
 fn valid_id(s: &str) -> Option<String> {
@@ -132,7 +134,7 @@ pub fn load(src: &str, opts: &Options, progress: Progress) -> Result<(Transcript
             if kind == Kind::Video {
                 progress("extract", None, "Extracting audio with ffmpeg");
             }
-            let r = transcribe::transcribe(&path, &opts.model, opts.language.as_deref(), progress)?;
+            let r = transcribe::transcribe(&path, &opts.model, opts.language.as_deref(), opts.speaker_turns, progress)?;
             let t = Transcript {
                 segments: r.segments,
                 source: src.to_string(),
@@ -255,7 +257,7 @@ fn load_url(url: &str, opts: &Options, progress: Progress) -> Result<(Transcript
     progress("download", None, if vid.is_some() { "No captions available, downloading audio" } else { "Downloading audio" });
     let tmp = tools::TempDir::new().map_err(|e| e.to_string())?;
     let (audio, title) = download_audio(url, &tmp.0, progress)?;
-    let r = transcribe::transcribe(&audio, &opts.model, opts.language.as_deref(), progress)?;
+    let r = transcribe::transcribe(&audio, &opts.model, opts.language.as_deref(), opts.speaker_turns, progress)?;
     let t = Transcript {
         segments: r.segments,
         source: url.to_string(),
