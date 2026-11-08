@@ -19,6 +19,8 @@ pub enum Action {
     /// Open this recap, optionally jumping to a time.
     Open(String, Option<f64>),
     ShowInFolder(String),
+    Rename(String, String),
+    Delete(String),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -81,6 +83,11 @@ pub struct Explorer {
     text: HashMap<String, Vec<(f64, String, String)>>,
     tldr: HashMap<String, Option<String>>,
     hits: Option<(String, usize, Vec<Hit>)>,
+    /// (recap id, name being typed)
+    renaming: Option<(String, String)>,
+    /// (recap id, armed until): Delete asks once more before it deletes
+    arm_delete: Option<(String, f64)>,
+    focus_rename: bool,
 }
 
 impl Explorer {
@@ -111,8 +118,11 @@ impl Explorer {
             return None;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.open = false;
-            return None;
+            // Esc backs out of a rename first, then closes the explorer
+            if self.renaming.take().is_none() {
+                self.open = false;
+                return None;
+            }
         }
         let screen = ctx.screen_rect();
         let size = Vec2::new((screen.width() - 80.0).clamp(640.0, 1200.0), (screen.height() - 140.0).clamp(420.0, 760.0));
@@ -351,7 +361,32 @@ impl Explorer {
                 );
 
                 let resp = match e {
-                    Entry::Item(ix) => resp.on_hover_text(visual(&library[*ix].title)),
+                    Entry::Item(ix) => {
+                        let m = &library[*ix];
+                        let resp = resp.on_hover_text(visual(&m.title));
+                        resp.context_menu(|ui| {
+                            if ui.button("Open").clicked() {
+                                *action = Some(Action::Open(m.id.clone(), hit_times.get(ix).copied()));
+                                ui.close_menu();
+                            }
+                            if ui.button("Rename…").clicked() {
+                                self.selected = Some(Sel::Item(m.id.clone()));
+                                self.renaming = Some((m.id.clone(), m.title.clone()));
+                                self.focus_rename = true;
+                                ui.close_menu();
+                            }
+                            if ui.button("Show in folder").clicked() {
+                                *action = Some(Action::ShowInFolder(m.id.clone()));
+                                ui.close_menu();
+                            }
+                            if ui.button("Delete…").clicked() {
+                                self.selected = Some(Sel::Item(m.id.clone()));
+                                self.arm_delete = Some((m.id.clone(), ui.input(|i| i.time) + 4.0));
+                                ui.close_menu();
+                            }
+                        });
+                        resp
+                    }
                     Entry::Folder(_) => resp,
                 };
                 if resp.clicked() {
@@ -400,7 +435,35 @@ impl Explorer {
                 let m = &library[ix];
                 let (r, _) = ui.allocate_exact_size(Vec2::new(64.0, 64.0), Sense::hover());
                 file_icon(ui.painter(), r, &m.source_type);
-                ui.add(egui::Label::new(RichText::new(visual(&m.title)).font(bold(18.0)).color(TEAL)).wrap());
+                match self.renaming.as_mut().filter(|(id, _)| *id == m.id) {
+                    Some((_, name)) => {
+                        let te = ui.add(egui::TextEdit::singleline(name).desired_width(ui.available_width() - 8.0));
+                        if std::mem::take(&mut self.focus_rename) {
+                            te.request_focus();
+                        }
+                        let enter = te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        let mut done = None;
+                        ui.horizontal(|ui| {
+                            if ui.button("Save").clicked() || enter {
+                                done = Some(true);
+                            }
+                            if ui.button("Cancel").clicked() {
+                                done = Some(false);
+                            }
+                        });
+                        match done {
+                            Some(true) => {
+                                *action = Some(Action::Rename(m.id.clone(), name.trim().to_string()));
+                                self.renaming = None;
+                            }
+                            Some(false) => self.renaming = None,
+                            None => {}
+                        }
+                    }
+                    None => {
+                        ui.add(egui::Label::new(RichText::new(visual(&m.title)).font(bold(18.0)).color(TEAL)).wrap());
+                    }
+                }
                 let (y, mo, d) = ymd(m.created);
                 field(ui, "Created", &format!("{d:02}/{mo:02}/{y}"));
                 field(ui, "Length", &fmt_time(m.duration));
@@ -448,6 +511,27 @@ impl Explorer {
                     }
                     if ui.button("Show in folder").clicked() {
                         *action = Some(Action::ShowInFolder(m.id.clone()));
+                    }
+                    if ui.button("Rename").clicked() {
+                        self.renaming = Some((m.id.clone(), m.title.clone()));
+                        self.focus_rename = true;
+                    }
+                    let now = ui.input(|i| i.time);
+                    let armed = self.arm_delete.as_ref().is_some_and(|(id, until)| *id == m.id && now < *until);
+                    let label = if armed { RichText::new("Sure? Delete").color(MAGENTA) } else { RichText::new("Delete") };
+                    let resp = ui.button(label);
+                    if resp.clicked() {
+                        if armed {
+                            *action = Some(Action::Delete(m.id.clone()));
+                            self.arm_delete = None;
+                            self.selected = None;
+                        } else {
+                            self.arm_delete = Some((m.id.clone(), now + 4.0));
+                        }
+                    }
+                    if armed {
+                        resp.on_hover_text("Click again to delete this recap, its transcript and its audio");
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
                     }
                 });
                 return;

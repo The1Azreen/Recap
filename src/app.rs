@@ -1251,6 +1251,17 @@ impl eframe::App for App {
                     tools::open_in_file_manager(&d);
                 }
             }
+            Some(explorer::Action::Rename(id, title)) => match library::set_title(&id, &title) {
+                Ok(m) => {
+                    if let Some(o) = self.open.as_mut().filter(|o| o.meta.id == id) {
+                        o.meta = m;
+                    }
+                    self.set_status("Renamed", false);
+                    self.refresh_library();
+                }
+                Err(e) => self.set_status(e, true),
+            },
+            Some(explorer::Action::Delete(id)) => self.delete_item(&id),
             None => {}
         }
         self.take_screenshot(ctx);
