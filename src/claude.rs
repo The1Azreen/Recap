@@ -29,6 +29,30 @@ Transcripts come from speech recognition or captions and may contain misheard wo
 context and never invent content that isn't there. Write in the transcript's language. Times in the transcript \
 are [hh:mm:ss] markers; chapter start values are those times converted to seconds.";
 
+/// The API key lives in the Windows Credential Manager (or the platform's keychain), not in
+/// the settings file.
+fn key_entry() -> Result<keyring::Entry, String> {
+    keyring::Entry::new("Recap", "anthropic-api-key").map_err(|e| e.to_string())
+}
+
+/// The stored API key, if there is one.
+pub fn load_key() -> Option<String> {
+    key_entry().ok()?.get_password().ok().filter(|k| !k.trim().is_empty())
+}
+
+/// Stores the API key; an empty key removes it.
+pub fn store_key(key: &str) -> Result<(), String> {
+    let entry = key_entry()?;
+    if key.trim().is_empty() {
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
+    } else {
+        entry.set_password(key.trim()).map_err(|e| e.to_string())
+    }
+}
+
 pub struct Client {
     pub api_key: String,
     pub effort: String,
@@ -283,5 +307,18 @@ mod tests {
     fn summary_json_shape_parses() {
         let s: Summary = serde_json::from_value(json!({"title":"T","tldr":"x","key_points":["a"],"action_items":[],"chapters":[{"start":1.5,"title":"c","summary":"s"}]})).unwrap();
         assert_eq!(s.chapters[0].start, 1.5);
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    /// Round-trips a throwaway entry through the real Credential Manager.
+    #[test]
+    fn credential_store_round_trip() {
+        let e = keyring::Entry::new("Recap-test", "round-trip").unwrap();
+        e.set_password("sk-test-123").unwrap();
+        assert_eq!(e.get_password().unwrap(), "sk-test-123");
+        e.delete_credential().unwrap();
+        assert!(matches!(e.get_password(), Err(keyring::Error::NoEntry)));
     }
 }

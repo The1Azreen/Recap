@@ -37,7 +37,8 @@ pub struct Options {
 #[serde(default)]
 struct Saved {
     style: String,
-    /// Plain text in the settings file; ANTHROPIC_API_KEY takes precedence when set.
+    /// Only used when the Credential Manager can't be reached (older versions kept the key here;
+    /// it's moved to the Credential Manager on start). ANTHROPIC_API_KEY takes precedence.
     api_key: String,
     model: String,
     language: String,
@@ -95,6 +96,10 @@ struct Shot {
 
 pub struct App {
     saved: Saved,
+    /// The Claude API key as typed in Settings (kept in the Credential Manager).
+    api_key: String,
+    /// True when the key has to stay in the settings file because the Credential Manager failed.
+    key_in_file: bool,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     start: std::time::Instant,
@@ -142,13 +147,25 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: Options) -> Self {
         install(&cc.egui_ctx);
         tools::update_yt_dlp_in_background();
-        let saved: Saved = cc.storage.and_then(|s| eframe::get_value(s, "recap")).unwrap_or_default();
+        let mut saved: Saved = cc.storage.and_then(|s| eframe::get_value(s, "recap")).unwrap_or_default();
+        // Move a key saved in plain text by an older version into the Credential Manager.
+        let mut key_in_file = false;
+        let api_key = if saved.api_key.trim().is_empty() {
+            claude::load_key().unwrap_or_default()
+        } else if claude::store_key(&saved.api_key).is_ok() {
+            std::mem::take(&mut saved.api_key)
+        } else {
+            key_in_file = true;
+            saved.api_key.clone()
+        };
         set_glow(saved.glow);
         let (tx, rx) = channel();
         let mut player = Player::new();
         player.set_volume(saved.volume);
         let mut app = App {
             saved,
+            api_key,
+            key_in_file,
             tx,
             rx,
             start: std::time::Instant::now(),
@@ -198,7 +215,7 @@ impl App {
     }
 
     fn api_key(&self) -> String {
-        std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.trim().is_empty()).unwrap_or_else(|| self.saved.api_key.trim().to_string())
+        std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.trim().is_empty()).unwrap_or_else(|| self.api_key.trim().to_string())
     }
 
     fn client(&self) -> Client {
@@ -1111,9 +1128,29 @@ impl App {
                 let env = std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.trim().is_empty()).is_some();
                 ui.horizontal(|ui| {
                     ui.label("API key");
-                    ui.add_enabled(!env, egui::TextEdit::singleline(&mut self.saved.api_key).password(true).hint_text("sk-ant-…").desired_width(300.0));
+                    let r = ui.add_enabled(!env, egui::TextEdit::singleline(&mut self.api_key).password(true).hint_text("sk-ant-…").desired_width(300.0));
+                    if r.changed() {
+                        match claude::store_key(&self.api_key) {
+                            Ok(()) => {
+                                self.key_in_file = false;
+                                self.saved.api_key.clear();
+                            }
+                            Err(_) => {
+                                // no Credential Manager: fall back to the settings file
+                                self.key_in_file = true;
+                                self.saved.api_key = self.api_key.clone();
+                            }
+                        }
+                    }
                 });
-                ui.label(RichText::new(if env { "Using ANTHROPIC_API_KEY from the environment." } else { "Saved in plain text in your settings file. Or set ANTHROPIC_API_KEY instead." }).small().color(DIM));
+                let note = if env {
+                    "Using ANTHROPIC_API_KEY from the environment."
+                } else if self.key_in_file {
+                    "The Credential Manager isn't available, so the key is saved in plain text in your settings file."
+                } else {
+                    "Kept in the Windows Credential Manager. Or set ANTHROPIC_API_KEY instead."
+                };
+                ui.label(RichText::new(note).small().color(DIM));
                 ui.horizontal(|ui| {
                     ui.label(format!("Model: {}   Effort", claude::MODEL));
                     egui::ComboBox::from_id_salt("effort").selected_text(&self.saved.effort).show_ui(ui, |ui| {
@@ -1209,9 +1246,9 @@ pub struct CliArgs {
 }
 
 /// `recap --cli <source>`: the same pipeline without the window, progress on stdout.
-/// The Claude key comes from ANTHROPIC_API_KEY.
+/// The Claude key comes from ANTHROPIC_API_KEY, or the one saved in Settings.
 pub fn cli(a: CliArgs) -> i32 {
-    let key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+    let key = std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.trim().is_empty()).or_else(claude::load_key).unwrap_or_default();
     let opts = sources::Options { model: a.model, language: a.language, force_transcribe: a.force_transcribe };
     if a.summarize && key.trim().is_empty() {
         println!("note: ANTHROPIC_API_KEY not set, skipping the summary");

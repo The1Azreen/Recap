@@ -45,7 +45,8 @@ downloads the `large-v3-turbo` model (1.6 GB) into `~\Recap\models`. The top bar
    - `yt-dlp.exe` from [github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp/releases).
      Recap updates it to the latest nightly build in the background, at most once a day.
    - `whisper-cli.exe` from the build script above
-3. For summaries and Q&A, add a Claude API key in **Settings**, or set `ANTHROPIC_API_KEY`.
+3. For summaries and Q&A, add a Claude API key in **Settings** (kept in the Windows Credential
+   Manager, not in a file), or set `ANTHROPIC_API_KEY`.
    Transcripts work without a key.
 
 Settings → *Open tools folder* shows where to drop the tools. To make Recap portable, create a
