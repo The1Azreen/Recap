@@ -64,6 +64,28 @@ pub fn kind_of(src: &str) -> Result<Kind, String> {
     }
 }
 
+/// True for a link to a whole YouTube playlist (not a single video that happens to be in one).
+pub fn is_playlist(url: &str) -> bool {
+    let yt = url.contains("youtube.com/") || url.contains("youtu.be/");
+    yt && (url.contains("/playlist?") || (url.contains("list=") && video_id(url).is_none()))
+}
+
+/// The video links in a playlist, read without downloading anything.
+pub fn playlist_entries(url: &str) -> Result<Vec<String>, String> {
+    let out = tools::command(&yt_dlp()?)
+        .args(["--flat-playlist", "--no-warnings", "--print", "url"])
+        .arg(url)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("Couldn't run yt-dlp: {e}"))?;
+    let urls: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|l| l.starts_with("http")).map(str::to_string).collect();
+    if urls.is_empty() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("Couldn't read the playlist: {}", err.lines().last().unwrap_or("no videos found")));
+    }
+    Ok(urls)
+}
+
 pub fn is_media_file(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).is_some_and(|e| VIDEO_EXTS.contains(&e.as_str()) || AUDIO_EXTS.contains(&e.as_str()))
 }
@@ -308,6 +330,14 @@ mod tests {
         ] {
             assert_eq!(video_id(u).as_deref(), want, "{u}");
         }
+    }
+
+    #[test]
+    fn playlists() {
+        assert!(is_playlist("https://www.youtube.com/playlist?list=PL1234567890"));
+        assert!(!is_playlist("https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL1234567890"));
+        assert!(!is_playlist("https://youtu.be/dQw4w9WgXcQ"));
+        assert!(!is_playlist("https://example.com/watch?list=1"));
     }
 
     #[test]

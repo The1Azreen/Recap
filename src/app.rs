@@ -1,6 +1,6 @@
 //! Recap's window: the same look as JAMP (night sky, neon-yellow windows, magenta taskbar).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
@@ -71,6 +71,7 @@ enum Msg {
     Summarized { id: String, result: Result<(Summary, Meta), String> },
     Answer { id: String, question: String, result: Result<String, String> },
     AudioReady { id: String, result: Result<Meta, String> },
+    Playlist(Result<Vec<String>, String>),
 }
 
 struct OpenItem {
@@ -117,6 +118,12 @@ pub struct App {
     player_for: Option<String>,
 
     busy: bool,
+    /// Sources waiting to be recapped, one after another.
+    queue: VecDeque<String>,
+    /// The source being recapped right now.
+    current: Option<String>,
+    /// (finished, failed) in the current run of the queue
+    batch: (usize, usize),
     side_busy: Option<String>,
     status: String,
     status_err: bool,
@@ -160,6 +167,9 @@ impl App {
             player,
             player_for: None,
             busy: false,
+            queue: VecDeque::new(),
+            current: None,
+            batch: (0, 0),
             side_busy: None,
             status: "Ready".into(),
             status_err: false,
@@ -212,10 +222,8 @@ impl App {
         }
     }
 
+    /// "Recap it" / "Add to queue": takes the link or file from the New Recap window.
     fn start_recap(&mut self, ctx: &egui::Context) {
-        if self.busy {
-            return;
-        }
         let source = match (&self.file, self.url.trim()) {
             (Some(f), _) => f.to_string_lossy().into_owned(),
             (None, u) if !u.is_empty() => u.to_string(),
@@ -224,10 +232,50 @@ impl App {
                 return;
             }
         };
+        if sources::is_playlist(&source) {
+            self.url.clear();
+            self.expand_playlist(ctx, source);
+            return;
+        }
         if let Err(e) = sources::kind_of(&source) {
             self.set_status(e, true);
             return;
         }
+        self.file = None;
+        self.url.clear();
+        self.enqueue(ctx, vec![source]);
+    }
+
+    /// Adds sources to the queue and starts the first one if nothing is running.
+    fn enqueue(&mut self, ctx: &egui::Context, sources: Vec<String>) {
+        let n = sources.len();
+        self.queue.extend(sources);
+        if self.busy {
+            let what = if n == 1 { "1 item".to_string() } else { format!("{n} items") };
+            self.set_status(format!("Added {what} to the queue ({} waiting)", self.queue.len()), false);
+        } else {
+            self.batch = (0, 0);
+            self.start_next(ctx);
+        }
+    }
+
+    fn start_next(&mut self, ctx: &egui::Context) {
+        if let Some(source) = self.queue.pop_front() {
+            self.run_source(ctx, source);
+        }
+    }
+
+    fn expand_playlist(&mut self, ctx: &egui::Context, url: String) {
+        let (tx, ctx2) = (self.tx.clone(), ctx.clone());
+        self.side_busy = Some("Reading the playlist…".into());
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::Playlist(sources::playlist_entries(&url)));
+            ctx2.request_repaint();
+        });
+    }
+
+    fn run_source(&mut self, ctx: &egui::Context, source: String) {
+        self.current = Some(source.clone());
         let summarize = self.saved.summarize && !self.api_key().is_empty();
         let opts = sources::Options {
             model: self.saved.model.clone(),
@@ -301,28 +349,58 @@ impl App {
         });
     }
 
-    fn pump(&mut self) {
+    fn pump(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Progress { frac, msg } => {
-                    self.status = msg;
+                    self.status = if self.queue.is_empty() { msg } else { format!("{msg} · {} more queued", self.queue.len()) };
                     self.status_err = false;
                     self.frac = frac;
                 }
                 Msg::Warn(w) => self.set_status(w, true),
                 Msg::RecapDone(r) => {
                     self.busy = false;
+                    let source = self.current.take().unwrap_or_default();
                     match r {
                         Ok(id) => {
+                            self.batch.0 += 1;
                             if !self.status_err {
                                 self.set_status("Done", false);
                                 self.frac = Some(1.0);
                             }
-                            self.file = None;
-                            self.url.clear();
                             self.refresh_library();
                             self.open_item(&id, None);
                         }
+                        Err(e) => {
+                            self.batch.1 += 1;
+                            let many = self.batch.0 + self.batch.1 + self.queue.len() > 1;
+                            self.set_status(if many { format!("{}: {e}", source_label(&source)) } else { e }, true);
+                            // a single failed recap: give the input back so it can be retried
+                            if self.queue.is_empty() && self.batch == (0, 1) && self.url.is_empty() && self.file.is_none() {
+                                if source.starts_with("http") {
+                                    self.url = source;
+                                } else {
+                                    self.file = Some(PathBuf::from(source));
+                                }
+                            }
+                        }
+                    }
+                    if !self.queue.is_empty() {
+                        self.start_next(ctx);
+                    } else if self.batch.0 + self.batch.1 > 1 {
+                        let (ok, bad) = self.batch;
+                        let msg = format!("Queue finished: {ok} done{}", if bad > 0 { format!(", {bad} failed") } else { String::new() });
+                        if bad > 0 && self.status_err {
+                            self.status = format!("{msg} · last error: {}", self.status);
+                        } else {
+                            self.set_status(msg, bad > 0);
+                        }
+                    }
+                }
+                Msg::Playlist(r) => {
+                    self.side_busy = None;
+                    match r {
+                        Ok(urls) => self.enqueue(ctx, urls),
                         Err(e) => self.set_status(e, true),
                     }
                 }
@@ -538,7 +616,7 @@ impl App {
                     self.show_settings = !self.show_settings;
                 }
                 if ui.button("Open file").clicked() {
-                    self.pick_file();
+                    self.pick_file(&ui.ctx().clone());
                 }
                 if ui.add(egui::Button::new("Transcripts").selected(self.explorer.open)).on_hover_text("Browse and search all your transcripts").clicked() {
                     self.explorer.open = !self.explorer.open;
@@ -547,12 +625,17 @@ impl App {
         });
     }
 
-    fn pick_file(&mut self) {
+    fn pick_file(&mut self, ctx: &egui::Context) {
         let mut exts: Vec<&str> = sources::AUDIO_EXTS.to_vec();
         exts.extend_from_slice(sources::VIDEO_EXTS);
-        if let Some(f) = rfd::FileDialog::new().add_filter("Audio and video", &exts).pick_file() {
-            self.file = Some(f);
-            self.url.clear();
+        if let Some(mut files) = rfd::FileDialog::new().add_filter("Audio and video", &exts).pick_files() {
+            if files.len() == 1 {
+                self.file = files.pop();
+                self.url.clear();
+            } else if !files.is_empty() {
+                // several files at once go straight into the queue
+                self.enqueue(ctx, files.into_iter().map(|p| p.to_string_lossy().into_owned()).collect());
+            }
         }
     }
 
@@ -588,7 +671,7 @@ impl App {
         p.with_clip_rect(rect.shrink(4.0)).text(rect.center() - Vec2::new(0.0, 9.0), Align2::CENTER_CENTER, visual(&main), bold(16.0), col);
         p.text(rect.center() + Vec2::new(0.0, 12.0), Align2::CENTER_CENTER, sub, pixel(12.0), DIM);
         if resp.clicked() {
-            self.pick_file();
+            self.pick_file(ctx);
         }
 
         ui.add_space(6.0);
@@ -599,8 +682,36 @@ impl App {
         });
         ui.checkbox(&mut self.saved.force_transcribe, "Ignore YouTube captions");
         ui.add_space(6.0);
-        if big_button(ui, if self.busy { "Working…" } else { "▶ Recap it" }, !self.busy).clicked() {
+        let has_input = self.file.is_some() || !self.url.trim().is_empty();
+        let label = if !self.busy { "▶ Recap it" } else if has_input { "+ Add to queue" } else { "Working…" };
+        if big_button(ui, label, !self.busy || has_input).clicked() {
             self.start_recap(ctx);
+        }
+        if !self.queue.is_empty() {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Up next ({})", self.queue.len())).font(bold(14.0)).color(TEAL));
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if ui.small_button("Clear").on_hover_text("Remove everything waiting in the queue").clicked() {
+                        self.queue.clear();
+                    }
+                });
+            });
+            let mut remove = None;
+            for (i, s) in self.queue.iter().enumerate().take(5) {
+                ui.horizontal(|ui| {
+                    if ui.small_button("✕").on_hover_text("Remove from the queue").clicked() {
+                        remove = Some(i);
+                    }
+                    ui.add(egui::Label::new(RichText::new(visual(&source_label(s))).small().color(YELLOW)).truncate()).on_hover_text(s);
+                });
+            }
+            if self.queue.len() > 5 {
+                ui.label(RichText::new(format!("…and {} more", self.queue.len() - 5)).small().color(DIM));
+            }
+            if let Some(i) = remove {
+                self.queue.remove(i);
+            }
         }
     }
 
@@ -1177,6 +1288,14 @@ fn engine() -> (String, bool) {
     }
 }
 
+/// A short name for a queued source: the file name, or the link.
+fn source_label(src: &str) -> String {
+    if src.starts_with("http") {
+        return src.to_string();
+    }
+    std::path::Path::new(src).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| src.to_string())
+}
+
 fn method_short(m: &str) -> String {
     if m.starts_with("YouTube") {
         return "YouTube captions".into();
@@ -1188,12 +1307,17 @@ fn method_short(m: &str) -> String {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let now = self.time();
-        self.pump();
+        self.pump(ctx);
 
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
-        if let Some(f) = dropped.into_iter().find(|p| sources::is_media_file(p)) {
-            self.file = Some(f);
+        let mut dropped: Vec<PathBuf> = dropped.into_iter().filter(|p| sources::is_media_file(p)).collect();
+        if dropped.len() == 1 {
+            self.file = dropped.pop();
             self.url.clear();
+        } else if dropped.len() > 1 {
+            // several files at once go straight into the queue
+            dropped.sort();
+            self.enqueue(ctx, dropped.into_iter().map(|p| p.to_string_lossy().into_owned()).collect());
         }
 
         // keep the highlighted line in step with playback
