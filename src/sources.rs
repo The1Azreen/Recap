@@ -9,7 +9,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use crate::model::{merge_segments, Segment, Transcript};
+use crate::model::{clean_title, merge_segments, Segment, Transcript};
 use crate::tools;
 use crate::transcribe::{self, Progress};
 
@@ -86,7 +86,7 @@ pub fn load(src: &str, opts: &Options, progress: Progress) -> Result<(Transcript
                 segments: r.segments,
                 source: src.to_string(),
                 source_type: if kind == Kind::Video { "video" } else { "audio" }.into(),
-                title: path.file_stem().map(|s| s.to_string_lossy().into_owned()),
+                title: path.file_stem().map(|s| clean_title(&s.to_string_lossy())),
                 language: r.language,
                 method: r.method,
                 ..Default::default()

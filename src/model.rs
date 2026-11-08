@@ -109,6 +109,23 @@ pub fn merge_segments(segments: &[Segment], max_chars: usize, max_span: f64) -> 
 }
 
 /// 01:05 / 01:02:05; `always_hours` forces hh:mm:ss.
+/// Tidies a title taken from a file name: drops the "[dQw4w9WgXcQ]" video id that yt-dlp adds
+/// to downloaded file names, and turns underscores into spaces when there are no spaces at all.
+pub fn clean_title(title: &str) -> String {
+    let mut t = title.trim();
+    if let Some(open) = t.rfind('[') {
+        let inner = &t[open + 1..];
+        if let Some(id) = inner.strip_suffix(']') {
+            if id.len() == 11 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') && open > 0 {
+                t = t[..open].trim_end();
+            }
+        }
+    }
+    let t = t.trim_end_matches(['-', '_', ' ']).trim();
+    let t = if !t.contains(' ') && t.contains('_') { t.replace('_', " ") } else { t.to_string() };
+    if t.is_empty() { title.trim().to_string() } else { t }
+}
+
 pub fn fmt_ts(seconds: f64, always_hours: bool) -> String {
     let s = seconds.max(0.0) as u64;
     let (h, m, s) = (s / 3600, s / 60 % 60, s % 60);
@@ -137,6 +154,15 @@ pub fn parse_ts(s: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn titles() {
+        assert_eq!(clean_title("Gravity Rush - PlayStation's Forgotten Gem [t2xMG6IA03s]"), "Gravity Rush - PlayStation's Forgotten Gem");
+        assert_eq!(clean_title("my_lecture_notes"), "my lecture notes");
+        assert_eq!(clean_title("Keep [this part] here"), "Keep [this part] here");
+        assert_eq!(clean_title("[t2xMG6IA03s]"), "[t2xMG6IA03s]");
+        assert_eq!(clean_title("Plain title"), "Plain title");
+    }
 
     #[test]
     fn merges_fragments() {

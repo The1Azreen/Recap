@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::model::{Meta, Summary, Transcript};
+use crate::model::{clean_title, Meta, Summary, Transcript};
 use crate::tools;
 
 fn slug(text: &str) -> String {
@@ -104,13 +104,32 @@ pub fn save(t: &Transcript, summary: Option<&Summary>, style: Option<&str>, medi
 
 pub fn list() -> Vec<Meta> {
     let Ok(rd) = std::fs::read_dir(tools::library_dir()) else { return Vec::new() };
-    let mut items: Vec<Meta> = rd.flatten().filter_map(|e| read_json(&e.path().join("meta.json")).ok()).collect();
+    let mut items: Vec<Meta> = rd.flatten().filter_map(|e| read_json(&e.path().join("meta.json")).ok()).map(tidy).collect();
     items.sort_by(|a, b| b.created.total_cmp(&a.created));
     items
 }
 
 pub fn meta(id: &str) -> Result<Meta, String> {
-    read_json(&dir(id)?.join("meta.json"))
+    read_json(&dir(id)?.join("meta.json")).map(tidy)
+}
+
+/// Older recaps saved file-name titles like "Talk [dQw4w9WgXcQ]"; show them tidied.
+fn tidy(mut m: Meta) -> Meta {
+    m.title = clean_title(&m.title);
+    m
+}
+
+/// Renames a recap. Returns the updated metadata.
+pub fn set_title(id: &str, title: &str) -> Result<Meta, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("The name can't be empty".into());
+    }
+    let d = dir(id)?;
+    let mut m: Meta = read_json(&d.join("meta.json"))?;
+    m.title = title.to_string();
+    write_json(&d.join("meta.json"), &m)?;
+    Ok(m)
 }
 
 pub fn transcript(id: &str) -> Result<Transcript, String> {
