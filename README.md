@@ -6,6 +6,12 @@ plus a structured summary: TL;DR, key points, action items and chapters.
 Recap is a native Windows app (Rust + egui, a single ~9 MB `recap.exe`). There's no browser
 and no web server. It uses the same look as [JAMP](https://github.com/The1Azreen/Just-Another-Music-Player).
 
+![Recap's main window: New Recap and Library on the left, Summary and Ask in the middle, the timestamped transcript on the right](assets/screenshots/main.png)
+
+The **Transcripts** explorer browses and searches every recap you've made:
+
+![The Transcript Explorer: a folder tree, YouTube thumbnails and a details pane](assets/screenshots/explorer.png)
+
 ```
 Input  →  Get text  →  Clean/chunk  →  Summarize  →  Output
 ```
