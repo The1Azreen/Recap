@@ -66,7 +66,7 @@ impl Default for Saved {
 }
 
 enum Msg {
-    Progress { frac: Option<f32>, msg: String },
+    Progress { stage: String, frac: Option<f32>, msg: String },
     Warn(String),
     RecapDone(Result<String, String>),
     Summarized { id: String, result: Result<(Summary, Meta), String> },
@@ -133,6 +133,8 @@ pub struct App {
     status: String,
     status_err: bool,
     frac: Option<f32>,
+    /// (stage, when it was first seen with a fraction, that fraction): for the time-left guess
+    eta: Option<(String, std::time::Instant, f32)>,
 
     question: String,
     answer: Option<(String, String)>,
@@ -191,6 +193,7 @@ impl App {
             status: "Ready".into(),
             status_err: false,
             frac: None,
+            eta: None,
             question: String::new(),
             answer: None,
             show_settings: false,
@@ -233,8 +236,8 @@ impl App {
     fn progress_fn(&self, ctx: &egui::Context) -> impl Fn(&str, Option<f32>, &str) + Sync + Send + 'static {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
-        move |_stage: &str, frac: Option<f32>, msg: &str| {
-            let _ = tx.send(Msg::Progress { frac, msg: msg.to_string() });
+        move |stage: &str, frac: Option<f32>, msg: &str| {
+            let _ = tx.send(Msg::Progress { stage: stage.to_string(), frac, msg: msg.to_string() });
             ctx.request_repaint();
         }
     }
@@ -276,6 +279,32 @@ impl App {
         }
     }
 
+    /// A rough "~4 min left" for the running stage, from how fast its fraction has moved.
+    fn time_left(&mut self, stage: &str, f: f32) -> Option<String> {
+        let now = std::time::Instant::now();
+        match &self.eta {
+            Some((s, _, f0)) if s == stage && f >= *f0 => {}
+            _ => {
+                self.eta = Some((stage.to_string(), now, f));
+                return None;
+            }
+        }
+        let (_, t0, f0) = self.eta.as_ref()?;
+        let elapsed = now.duration_since(*t0).as_secs_f32();
+        let done = f - f0;
+        if elapsed < 3.0 || done < 0.02 {
+            return None;
+        }
+        let secs = (elapsed / done * (1.0 - f)).max(0.0);
+        Some(if secs < 50.0 {
+            format!("~{} s left", ((secs / 10.0).ceil() * 10.0).max(10.0) as u32)
+        } else if secs < 90.0 * 60.0 {
+            format!("~{} min left", (secs / 60.0).round().max(1.0) as u32)
+        } else {
+            format!("~{:.1} h left", secs / 3600.0)
+        })
+    }
+
     fn start_next(&mut self, ctx: &egui::Context) {
         if let Some(source) = self.queue.pop_front() {
             self.run_source(ctx, source);
@@ -293,6 +322,7 @@ impl App {
 
     fn run_source(&mut self, ctx: &egui::Context, source: String) {
         self.current = Some(source.clone());
+        self.eta = None;
         let summarize = self.saved.summarize && !self.api_key().is_empty();
         let opts = sources::Options {
             model: self.saved.model.clone(),
@@ -369,7 +399,9 @@ impl App {
     fn pump(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Progress { frac, msg } => {
+                Msg::Progress { stage, frac, msg } => {
+                    let left = frac.and_then(|f| self.time_left(&stage, f)).map(|t| format!(" · {t}")).unwrap_or_default();
+                    let msg = format!("{msg}{left}");
                     self.status = if self.queue.is_empty() { msg } else { format!("{msg} · {} more queued", self.queue.len()) };
                     self.status_err = false;
                     self.frac = frac;
